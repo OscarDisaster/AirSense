@@ -1,78 +1,131 @@
 #include <Arduino.h>
-#include <Wire.h>
-#include <ESP8266WiFi.h>
-#include <Adafruit_Sensor.h>
+#include <WiFi.h>
 #include <Adafruit_BME680.h>
-#include "credentials.h"
+#include <ESPSupabaseOscar.h>
+#include <ESP_SupabaseOscar_Realtime.h>
+#include "credentials.h" // Archivo con tus credenciales
 
-// Configuración WiFi
-const char* ssid = WIFI_SSID;
-const char* password = WIFI_PASSWORD;
-
-
-// Crear objeto BME680
+// Objetos globales
 Adafruit_BME680 bme;
+Supabase db;
+SupabaseRealtime realtime;
 
-void setupWiFi() {
-    Serial.println();
-    Serial.print("Conectando a ");
-    Serial.println(ssid);
+// Constantes
+const uint32_t SEND_DATA_INTERVAL = 2000; // Intervalo para enviar datos en milisegundos
+unsigned long lastSendTime = 0;            // Última vez que se enviaron datos
 
-    WiFi.begin(ssid, password);
-
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-    }
-
-    Serial.println("");
-    Serial.println("WiFi conectado");
-    Serial.println("Dirección IP: ");
-    Serial.println(WiFi.localIP());
-}
-
-void setup() {
-    Serial.begin(9600);
-    Wire.begin(D2, D1); // SDA, SCL
-
-    // Inicializar WiFi
-    setupWiFi();
-
-    // Inicializar el sensor
+// Función para inicializar el sensor BME680
+void initializeSensor() {
+    Serial.println("[BME680] Iniciando sensor...");
     if (!bme.begin()) {
-        Serial.println("No se encontró el sensor BME680, verifica conexiones!");
-        while (1);
+        Serial.println("[BME680] ¡Sensor no encontrado!");
+        while (true) {} // Detener el programa si el sensor no está disponible
     }
 
-    // Configurar el sensor
+    Serial.println("[BME680] Sensor inicializado correctamente");
     bme.setTemperatureOversampling(BME680_OS_8X);
     bme.setHumidityOversampling(BME680_OS_2X);
     bme.setPressureOversampling(BME680_OS_4X);
     bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
-    bme.setGasHeater(320, 150); // 320*C durante 150 ms
+    bme.setGasHeater(320, 150);
 }
 
-void loop() {
-    if (bme.performReading()) {
-        // Verificar conexión WiFi
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.println("--------------------");
-            Serial.print("Temperatura = ");
-            Serial.print(bme.temperature);
-            Serial.println(" *C");
+// Callback para manejar mensajes de Realtime
+void realtimeCallback(String message) {
+    Serial.println("[Realtime] Mensaje recibido:");
+    Serial.println(message);
+}
 
-            Serial.print("Presión = ");
-            Serial.print(bme.pressure / 100.0);
-            Serial.println(" hPa");
+// Función para configurar la conexión WiFi
+void connectWiFi() {
+    Serial.println("Conectando a WiFi...");
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-            Serial.print("Humedad = ");
-            Serial.print(bme.humidity);
-            Serial.println(" %");
-
-            Serial.print("Gas = ");
-            Serial.print(bme.gas_resistance / 1000.0);
-            Serial.println(" KOhms");
-        }
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print("...");
     }
-    delay(2000);
+
+    Serial.println("\nConectado a WiFi!");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+}
+
+// Función para enviar datos a Supabase
+// Función para enviar datos a Supabase
+void sendDataToSupabase() {
+    if (!bme.performReading()) {
+        Serial.println("[BME680] Error al leer los datos del sensor.");
+        return;
+    }
+
+    StaticJsonDocument<256> doc; // Aumentar el tamaño del documento JSON
+    doc["device_id"] = DEVICE_ID;
+    doc["temperature"] = bme.temperature;
+    doc["pressure"] = bme.pressure / 100.0;
+    doc["humidity"] = bme.humidity;
+    doc["gas"] = bme.gas_resistance / 1000.0;
+    doc["ssid"] = WiFi.SSID(); // Agregar el SSID actual
+    doc["refresh_time"] = SEND_DATA_INTERVAL / 1000; // Agregar el tiempo de refresco en segundos
+
+    String jsonString;
+    serializeJson(doc, jsonString);
+
+    Serial.println("[HTTP] Enviando datos a Supabase...");
+    Serial.println(jsonString);
+
+    int responseCode = db.insert("sensor_readings", jsonString, false);
+
+    // Mejor manejo de errores en la respuesta HTTP
+    if (responseCode == -100) {
+        Serial.println("[HTTP] Error: No se pudo conectar al servidor Supabase.");
+    } else if (responseCode < 0) {
+        Serial.println("[HTTP] Error desconocido: Código " + String(responseCode));
+    } else if (responseCode >= 200 && responseCode < 300) {
+        Serial.println("[HTTP] Datos enviados correctamente. Código de respuesta: " + String(responseCode));
+    } else {
+        Serial.println("[HTTP] Error inesperado: Código " + String(responseCode));
+    }
+
+    db.urlQuery_reset();
+}
+// Configuración inicial
+void setup() {
+    Serial.begin(9600);
+    Wire.begin(21, 22); // SDA, SCL
+
+    // Inicializar hardware y conexiones
+    initializeSensor();
+    connectWiFi();
+
+    // Configurar conexión a Supabase REST y Realtime
+
+    WiFiClientSecure &client = db.getClient();
+    client.setInsecure(); // Desactivar SSL
+
+    db.begin(SUPABASE_URL, SUPABASE_API_KEY);
+    realtime.begin(SUPABASE_URL, SUPABASE_API_KEY, realtimeCallback);
+
+    // Agregar un listener para los cambios en la tabla "sensor_readings"
+    realtime.addChangesListener("sensor_readings", "INSERT", "public", "");
+
+    // Iniciar la conexión de Realtime
+    realtime.listen();
+
+    // Primera inserción de prueba
+    Serial.println("[HTTP] Probando inserción HTTP...");
+    sendDataToSupabase();
+    Serial.println("[HTTP] Prueba completada");
+}
+
+// Bucle principal
+void loop() {
+    // Mantener viva la conexión Realtime
+    realtime.loop();
+
+    // Enviar datos periódicamente
+    if (millis() - lastSendTime >= SEND_DATA_INTERVAL) {
+        lastSendTime = millis();
+        sendDataToSupabase();
+    }
 }

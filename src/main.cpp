@@ -12,7 +12,14 @@ SupabaseRealtime realtime;
 
 // Constantes
 const uint32_t SEND_DATA_INTERVAL = 2000; // Intervalo para enviar datos en milisegundos
-unsigned long lastSendTime = 0;            // Última vez que se enviaron datos
+const int LED_PIN = 2; // Pin del LED (puedes cambiarlo según tu configuración)
+const int CONNECTED_BLINK_INTERVAL = 1000; // Intervalo de parpadeo lento (conectado)
+const int DISCONNECTED_BLINK_INTERVAL = 200; // Intervalo de parpadeo rápido (desconectado)
+
+// Variables globales
+unsigned long lastSendTime = 0; // Última vez que se enviaron datos
+unsigned long lastBlinkTime = 0; // Última vez que el LED parpadeó
+bool ledState = LOW; // Estado actual del LED
 
 // Función para inicializar el sensor BME680
 void initializeSensor() {
@@ -36,12 +43,23 @@ void realtimeCallback(String message) {
     Serial.println(message);
 }
 
+// Función para hacer parpadear el LED
+void blinkLED(int interval) {
+    unsigned long currentTime = millis();
+    if (currentTime - lastBlinkTime >= interval) {
+        lastBlinkTime = currentTime;
+        ledState = !ledState;
+        digitalWrite(LED_PIN, ledState);
+    }
+}
+
 // Función para configurar la conexión WiFi
 void connectWiFi() {
     Serial.println("Conectando a WiFi...");
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
     while (WiFi.status() != WL_CONNECTED) {
+        blinkLED(DISCONNECTED_BLINK_INTERVAL); // Parpadeo rápido mientras se conecta
         delay(500);
         Serial.print("...");
     }
@@ -51,7 +69,6 @@ void connectWiFi() {
     Serial.println(WiFi.localIP());
 }
 
-// Función para enviar datos a Supabase
 // Función para enviar datos a Supabase
 void sendDataToSupabase() {
     if (!bme.performReading()) {
@@ -89,17 +106,18 @@ void sendDataToSupabase() {
 
     db.urlQuery_reset();
 }
+
 // Configuración inicial
 void setup() {
     Serial.begin(9600);
     Wire.begin(21, 22); // SDA, SCL
+    pinMode(LED_PIN, OUTPUT); // Configurar el pin del LED como salida
 
     // Inicializar hardware y conexiones
     initializeSensor();
     connectWiFi();
 
     // Configurar conexión a Supabase REST y Realtime
-
     WiFiClientSecure &client = db.getClient();
     client.setInsecure(); // Desactivar SSL
 
@@ -127,5 +145,12 @@ void loop() {
     if (millis() - lastSendTime >= SEND_DATA_INTERVAL) {
         lastSendTime = millis();
         sendDataToSupabase();
+    }
+
+    // Parpadeo del LED según el estado de conexión WiFi
+    if (WiFi.status() == WL_CONNECTED) {
+        blinkLED(CONNECTED_BLINK_INTERVAL); // Parpadeo lento cuando está conectado
+    } else {
+        blinkLED(DISCONNECTED_BLINK_INTERVAL); // Parpadeo rápido cuando está desconectado
     }
 }
